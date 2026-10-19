@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flipbook</title>
+<script src="vendor/pdf.min.js"></script>
+<script src="vendor/page-flip.browser.js"></script>
+<style>
+:root{--bg:#f3ede3;--bg2:#e4dac9;--ink:#2a2118;--mute:#7a6a58;--card:#fffaf1;--accent:#8b4a2b}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1d1812;--bg2:#120f0b;--ink:#f1e7d6;--mute:#a39379;--card:#2a231a;--accent:#d9915f}}
+:root[data-theme="dark"]{--bg:#1d1812;--bg2:#120f0b;--ink:#f1e7d6;--mute:#a39379;--card:#2a231a;--accent:#d9915f}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:radial-gradient(ellipse at center,var(--bg),var(--bg2));color:var(--ink);font-family:Georgia,'Times New Roman',serif;overflow:hidden}
+button{font:inherit;color:inherit;cursor:pointer}
+#library{height:100%;overflow:auto;padding:32px 20px 60px;max-width:900px;margin:0 auto}
+h1{font-size:2rem;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 24px;font-family:system-ui,sans-serif;font-size:.95rem}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:28px;font-family:system-ui,sans-serif}
+.btn{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:11px 18px;font-weight:600}
+.btn.alt{background:var(--card);color:var(--ink);border:1px solid var(--bg2)}
+#drop{border:2px dashed var(--mute);border-radius:16px;padding:34px;text-align:center;color:var(--mute);font-family:system-ui,sans-serif;margin-bottom:28px}
+#drop.over{border-color:var(--accent);color:var(--accent)}
+.folder{margin-bottom:22px;font-family:system-ui,sans-serif}
+.folder h3{margin:0 0 10px;font-size:.85rem;letter-spacing:.04em;text-transform:uppercase;color:var(--mute)}
+.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:14px}
+.book{background:var(--card);border-radius:4px 10px 10px 4px;border-left:6px solid var(--accent);padding:14px 10px;min-height:140px;text-align:left;box-shadow:0 6px 14px rgba(0,0,0,.25);display:flex;flex-direction:column;justify-content:space-between;transition:transform .2s}
+.book:hover{transform:translateY(-4px) rotate(-1deg)}
+.book b{font-family:Georgia,serif;font-size:.92rem;word-break:break-word}
+.book span{font-size:.72rem;color:var(--mute)}
+#reader{display:none;height:100%;flex-direction:column}
+#bar{display:flex;align-items:center;gap:10px;padding:10px 14px;font-family:system-ui,sans-serif}
+#bar .t{flex:1;text-align:center;font-family:Georgia,serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ib{background:var(--card);border:1px solid var(--bg2);border-radius:8px;padding:7px 12px}
+#stage{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;padding:0 10px}
+#book{filter:drop-shadow(0 20px 30px rgba(0,0,0,.45))}
+.pg{background:#fff;overflow:hidden}
+.pg img{width:100%;height:100%;display:block;object-fit:contain;background:#fff}
+.pg.hard{box-shadow:inset 0 0 0 1px rgba(0,0,0,.15)}
+#foot{display:flex;align-items:center;justify-content:center;gap:14px;padding:10px 14px 16px;font-family:system-ui,sans-serif}
+#foot input{width:min(300px,50vw);accent-color:var(--accent)}
+#load{position:fixed;left:0;right:0;bottom:0;height:3px;background:var(--accent);width:0;transition:width .2s}
+</style>
+</head>
+<body>
+<div id="library">
+  <h1>📖 Flipbook</h1>
+  <p class="sub">Open any PDF as a real page-turning book. Your files stay on your computer.</p>
+  <div class="actions">
+    <button class="btn" id="pickFile">Open a PDF</button>
+    <button class="btn alt" id="pickDir">Choose a folder</button>
+    <button class="ib" id="theme" title="Toggle theme">◐</button>
+  </div>
+  <div id="drop">…or drop a PDF or a folder anywhere in this window</div>
+  <div id="shelves"></div>
+</div>
+
+<div id="reader">
+  <div id="bar">
+    <button class="ib" id="back">← Library</button>
+    <div class="t" id="title"></div>
+    <button class="ib" id="fs" title="Fullscreen (F11)">⛶</button>
+  </div>
+  <div id="stage"><div id="book"></div></div>
+  <div id="foot">
+    <button class="ib" id="prev">‹</button>
+    <input type="range" id="seek" min="1" max="1" value="1">
+    <span id="count">1 / 1</span>
+    <button class="ib" id="next">›</button>
+  </div>
+</div>
+<div id="load"></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='vendor/pdf.worker.min.js';
+const $=id=>document.getElementById(id);
+const T=window.__TAURI__, invoke=T.core.invoke;
+let flip=null, token=0, last=null;
+
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const isPdf=p=>/\.pdf$/i.test(p);
+const baseName=p=>p.split(/[\\/]/).pop();
+
+// ---------- library ----------
+$('pickFile').onclick=async()=>{
+  const p=await T.dialog.open({multiple:false,filters:[{name:'PDF',extensions:['pdf']}]});
+  if(p) openPath(p);
+};
+$('pickDir').onclick=async()=>{
+  const d=await T.dialog.open({directory:true});
+  if(d) scanFolder(d);
+};
+$('theme').onclick=()=>{
+  const r=document.documentElement, dark=getComputedStyle(r).getPropertyValue('--bg').trim()==='#1d1812';
+  r.dataset.theme=dark?'light':'dark';
+};
+
+async function scanFolder(root){
+  let list; try{ list=await invoke('scan_folder',{root}); }catch(e){ return false; }
+  try{localStorage.setItem('fb:root',root);}catch(e){}
+  const groups={};
+  list.forEach(f=>(groups[f.folder]=groups[f.folder]||[]).push(f));
+  const el=$('shelves'); el.innerHTML='';
+  const keys=Object.keys(groups).sort();
+  if(!keys.length){el.innerHTML='<p class="sub">No PDFs found in that folder.</p>';return true;}
+  keys.forEach(k=>{
+    const d=document.createElement('div'); d.className='folder';
+    d.innerHTML='<h3>📁 '+esc(k)+'</h3><div class="shelf"></div>';
+    groups[k].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})).forEach(f=>{
+      const b=document.createElement('button'); b.className='book';
+      b.innerHTML='<b>'+esc(f.name.replace(/\.pdf$/i,''))+'</b><span>'+(f.size/1048576).toFixed(1)+' MB</span>';
+      b.onclick=()=>openPath(f.path);
+      d.querySelector('.shelf').appendChild(b);
+    });
+    el.appendChild(d);
+  });
+  return true;
+}
+
+// drag & drop (native paths from Rust side)
+T.event.listen('tauri://drag-enter',()=>$('drop').classList.add('over'));
+T.event.listen('tauri://drag-leave',()=>$('drop').classList.remove('over'));
+T.event.listen('tauri://drag-drop',async e=>{
+  $('drop').classList.remove('over');
+  const ps=(e.payload&&e.payload.paths)||[];
+  const pdf=ps.find(isPdf);
+  if(pdf) openPath(pdf); else if(ps[0]) scanFolder(ps[0]);
+});
+
+// ---------- reader ----------
+async function openPath(path){
+  token++;
+  $('library').style.display='none'; $('reader').style.display='flex';
+  $('title').textContent=baseName(path).replace(/\.pdf$/i,'');
+  try{
+    const buf=await invoke('read_pdf',{path});
+    last={name:baseName(path),buf};
+    showBook(last.name,last.buf);
+  }catch(e){ alert('Could not open that file: '+e); backToLibrary(); }
+}
+
+async function showBook(name,buf){
+  const my=++token;
+  destroy();
+  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
+  if(my!==token) return;
+  const n=pdf.numPages;
+  const p1=await pdf.getPage(1), vp=p1.getViewport({scale:1});
+  const ratio=vp.width/vp.height;
+  const portrait=innerWidth<innerHeight*0.9 && innerWidth<700;
+  const availH=innerHeight-130, availW=innerWidth-30;
+  let h=availH, w=h*ratio;
+  const spread=portrait?w:w*2;
+  if(spread>availW){const k=availW/spread; w*=k; h*=k;}
+  w=Math.floor(w); h=Math.floor(h);
+
+  const key='fb:'+name+':'+buf.byteLength;
+  const save=p=>{try{localStorage.setItem(key,p);}catch(e){}};
+  let saved=1; try{saved=+localStorage.getItem(key)||1;}catch(e){}
+
+  const el=$('book'); el.innerHTML='';
+  for(let i=1;i<=n;i++){
+    const d=document.createElement('div');
+    d.className='pg'+((i===1||i===n)?' hard':'');
+    if(i===1||i===n) d.dataset.density='hard';
+    d.innerHTML='<img alt="Page '+i+'">';
+    el.appendChild(d);
+  }
+  flip=new St.PageFlip(el,{width:w,height:h,size:'fixed',showCover:true,maxShadowOpacity:.5,flippingTime:700,usePortrait:portrait,mobileScrollSupport:false,drawShadow:true});
+  flip.loadFromHTML(el.querySelectorAll('.pg'));
+  const seek=$('seek'); seek.max=n; seek.value=1;
+  const upd=()=>{const p=flip.getCurrentPageIndex()+1; seek.value=p; $('count').textContent=p+' / '+n; save(p);};
+  flip.on('flip',upd);
+  if(saved>1) flip.turnToPage(saved-1);
+  upd();
+
+  const imgs=el.querySelectorAll('img'), done=new Set();
+  async function render(i){
+    if(done.has(i)||i<1||i>n||my!==token) return; done.add(i);
+    const pg=await pdf.getPage(i), base=pg.getViewport({scale:1});
+    const v=pg.getViewport({scale:Math.min(2.5,(h*2)/base.height)});
+    const c=document.createElement('canvas'); c.width=v.width; c.height=v.height;
+    await pg.render({canvasContext:c.getContext('2d'),viewport:v}).promise;
+    if(my!==token) return;
+    imgs[i-1].src=c.toDataURL('image/jpeg',.88);
+    $('load').style.width=(done.size/n*100)+'%';
+    if(done.size===n) setTimeout(()=>$('load').style.width='0',400);
+  }
+  flip.on('flip',e=>{for(let k=-2;k<=4;k++) render(e.data+1+k);});
+  const order=[]; for(let d=0;d<n;d++){ if(saved+d<=n) order.push(saved+d); if(d&&saved-d>=1) order.push(saved-d); }
+  for(const i of order){ if(my!==token) return; await render(i); }
+}
+
+function destroy(){ if(flip){try{flip.destroy();}catch(e){} flip=null;} $('book').innerHTML=''; $('load').style.width='0'; }
+function backToLibrary(){ token++; last=null; destroy(); $('reader').style.display='none'; $('library').style.display='block'; }
+
+$('prev').onclick=()=>flip&&flip.flipPrev();
+$('next').onclick=()=>flip&&flip.flipNext();
+$('seek').oninput=e=>flip&&flip.turnToPage(+e.target.value-1);
+$('back').onclick=backToLibrary;
+$('fs').onclick=()=>{document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.();};
+addEventListener('keydown',e=>{
+  if(!flip) return;
+  if(e.key==='ArrowRight'||e.key==='PageDown') flip.flipNext();
+  if(e.key==='ArrowLeft'||e.key==='PageUp') flip.flipPrev();
+  if(e.key==='Escape') backToLibrary();
+});
+// re-fit the book when the window is resized
+let rz; addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(()=>{if(last&&flip) showBook(last.name,last.buf);},300);});
+
+// ---------- startup: opened-with file, else reopen last folder ----------
+(async()=>{
+  const f=await invoke('initial_file');
+  if(f){ openPath(f); return; }
+  let r=null; try{r=localStorage.getItem('fb:root');}catch(e){}
+  if(r) scanFolder(r);
+})();
+</script>
+</body>
+</html>
