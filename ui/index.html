@@ -223,12 +223,18 @@ $('prev').onclick=()=>flip&&flip.flipPrev();
 $('next').onclick=()=>flip&&flip.flipNext();
 $('seek').oninput=e=>flip&&flip.turnToPage(+e.target.value-1);
 $('back').onclick=backToLibrary;
-$('fs').onclick=()=>{document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.();};
-addEventListener('keydown',e=>{
+// HTML requestFullscreen() only fills the webview, not the screen, so use the window API
+const win=T.window.getCurrentWindow();
+const toggleFs=async()=>win.setFullscreen(!await win.isFullscreen());
+$('fs').onclick=toggleFs;
+addEventListener('keydown',async e=>{
+  if(e.key==='F11'){ e.preventDefault(); return toggleFs(); }
+  if(e.key==='Escape'&&await win.isFullscreen()) return win.setFullscreen(false);
   if(!flip) return;
-  if(e.key==='ArrowRight'||e.key==='PageDown') flip.flipNext();
-  if(e.key==='ArrowLeft'||e.key==='PageUp') flip.flipPrev();
-  if(e.key==='Escape') backToLibrary();
+  const next=()=>flip.flipNext(), prev=()=>flip.flipPrev();
+  const act={ArrowRight:next,PageDown:next,ArrowLeft:prev,PageUp:prev,Escape:backToLibrary,
+    Home:()=>flip.turnToPage(0),End:()=>flip.turnToPage(flip.getPageCount()-1)}[e.key];
+  if(act){ e.preventDefault(); act(); } // preventDefault: a focused slider must not also move (it snaps back on spreads)
 });
 // re-fit the book when the window is resized
 let rz; addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(()=>{if(last) showBook(last.name,last.buf);},300);});
