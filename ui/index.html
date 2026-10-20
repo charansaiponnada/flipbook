@@ -148,7 +148,8 @@ async function showBook(name,buf){
   destroy();
   let pdf, vp;
   try{
-    pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
+    // isEvalSupported:false blocks CVE-2024-4367 (script injection via crafted fonts) in this pdf.js
+    pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0)),isEvalSupported:false}).promise;
     if(my!==token) return pdf.destroy();
     doc=pdf;
     vp=(await pdf.getPage(1)).getViewport({scale:1});
