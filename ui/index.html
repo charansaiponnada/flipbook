@@ -76,7 +76,7 @@ h1{font-size:2rem;margin:0 0 4px}
 pdfjsLib.GlobalWorkerOptions.workerSrc='vendor/pdf.worker.min.js';
 const $=id=>document.getElementById(id);
 const T=window.__TAURI__, invoke=T.core.invoke;
-let flip=null, token=0, last=null;
+let flip=null, doc=null, token=0, last=null;
 
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const isPdf=p=>/\.pdf$/i.test(p);
@@ -130,23 +130,31 @@ T.event.listen('tauri://drag-drop',async e=>{
 
 // ---------- reader ----------
 async function openPath(path){
-  token++;
+  const my=++token;
   $('library').style.display='none'; $('reader').style.display='flex';
   $('title').textContent=baseName(path).replace(/\.pdf$/i,'');
-  try{
-    const buf=await invoke('read_pdf',{path});
-    last={name:baseName(path),buf};
-    showBook(last.name,last.buf);
-  }catch(e){ alert('Could not open that file: '+e); backToLibrary(); }
+  let buf; try{ buf=await invoke('read_pdf',{path}); }catch(e){ if(my===token) fail(e); return; }
+  if(my!==token) return; // user went back or opened something else meanwhile
+  last={name:baseName(path),buf};
+  showBook(last.name,last.buf);
+}
+function fail(e){
+  alert(e&&e.name==='PasswordException'?'This PDF is password-protected.':'Could not open that file: '+(e&&e.message||e));
+  backToLibrary();
 }
 
 async function showBook(name,buf){
   const my=++token;
   destroy();
-  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
+  let pdf, vp;
+  try{
+    pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
+    if(my!==token) return pdf.destroy();
+    doc=pdf;
+    vp=(await pdf.getPage(1)).getViewport({scale:1});
+  }catch(e){ if(my===token) fail(e); return; }
   if(my!==token) return;
   const n=pdf.numPages;
-  const p1=await pdf.getPage(1), vp=p1.getViewport({scale:1});
   const ratio=vp.width/vp.height;
   const portrait=innerWidth<innerHeight*0.9 && innerWidth<700;
   const availH=innerHeight-130, availW=innerWidth-30;
@@ -178,12 +186,14 @@ async function showBook(name,buf){
   const imgs=el.querySelectorAll('img'), done=new Set();
   async function render(i){
     if(done.has(i)||i<1||i>n||my!==token) return; done.add(i);
-    const pg=await pdf.getPage(i), base=pg.getViewport({scale:1});
-    const v=pg.getViewport({scale:Math.min(2.5,(h*2)/base.height)});
-    const c=document.createElement('canvas'); c.width=v.width; c.height=v.height;
-    await pg.render({canvasContext:c.getContext('2d'),viewport:v}).promise;
-    if(my!==token) return;
-    imgs[i-1].src=c.toDataURL('image/jpeg',.88);
+    try{
+      const pg=await pdf.getPage(i), base=pg.getViewport({scale:1});
+      const v=pg.getViewport({scale:Math.min(2.5,(h*2)/base.height)});
+      const c=document.createElement('canvas'); c.width=v.width; c.height=v.height;
+      await pg.render({canvasContext:c.getContext('2d'),viewport:v}).promise;
+      if(my!==token) return;
+      imgs[i-1].src=c.toDataURL('image/jpeg',.88);
+    }catch(e){ if(my!==token) return; } // a broken page stays blank, the rest still render
     $('load').style.width=(done.size/n*100)+'%';
     if(done.size===n) setTimeout(()=>$('load').style.width='0',400);
   }
@@ -192,7 +202,20 @@ async function showBook(name,buf){
   for(const i of order){ if(my!==token) return; await render(i); }
 }
 
-function destroy(){ if(flip){try{flip.destroy();}catch(e){} flip=null;} $('book').innerHTML=''; $('load').style.width='0'; }
+function destroy(){
+  if(flip){
+    const r=flip.getRender();
+    try{flip.destroy();}catch(e){}
+    // StPageFlip never cancels its requestAnimationFrame loop. Empty the renderer so the
+    // loop idles, a half-finished flip can't fire events, and the old pages can be freed.
+    for(const k in r) delete r[k];
+    r.render=()=>{};
+    flip=null;
+  }
+  if(doc){doc.destroy(); doc=null;}
+  $('stage').innerHTML='<div id="book"></div>'; // PageFlip.destroy() removes #book itself
+  $('load').style.width='0';
+}
 function backToLibrary(){ token++; last=null; destroy(); $('reader').style.display='none'; $('library').style.display='block'; }
 
 $('prev').onclick=()=>flip&&flip.flipPrev();
@@ -207,7 +230,7 @@ addEventListener('keydown',e=>{
   if(e.key==='Escape') backToLibrary();
 });
 // re-fit the book when the window is resized
-let rz; addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(()=>{if(last&&flip) showBook(last.name,last.buf);},300);});
+let rz; addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(()=>{if(last) showBook(last.name,last.buf);},300);});
 
 // ---------- startup: opened-with file, else reopen last folder ----------
 (async()=>{
