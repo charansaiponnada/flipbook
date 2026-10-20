@@ -4,8 +4,9 @@ Open any PDF as a real page-turning book. A small native Windows app written in 
 
 - **Open a PDF** or **choose a folder**. Every PDF inside it, including sub-folders, is listed as a book on a shelf.
 - Drag a PDF (or a folder) onto the window.
-- Page-curl animation, hard covers, two-page spread, page slider, keyboard arrows, full screen.
-- Remembers your page in every book and re-opens your last folder.
+- Page-curl animation, hard covers, two-page spread, page slider, full screen.
+- Keyboard: ← → (or Page Up/Down) to turn, Home / End, F11 for full screen, Esc to go back.
+- Remembers your page in every book, shows your progress on the shelf, and re-opens your last folder.
 - Right-click a PDF → **Open with → Flipbook** works after installing.
 - Everything stays on your computer.
 
