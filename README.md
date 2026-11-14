@@ -1,44 +1,70 @@
 # 📖 Flipbook
 
-Open any PDF as a real page-turning book. A small native Windows app written in **Rust** (Tauri), so there is no browser tab, no upload, and the whole thing ships as one `.exe`.
+Open any PDF as a real page-turning book. A native app written entirely in **Rust** with [**GPUI**](https://www.gpui.rs), the GPU-accelerated UI framework behind the Zed editor. No webview, no JavaScript, no upload: one `.exe`, and everything stays on your computer.
 
-- **Open a PDF** or **choose a folder**. Every PDF inside it, including sub-folders, is listed as a book on a shelf.
-- Drag a PDF (or a folder) onto the window.
-- Page-curl animation, hard covers, two-page spread, page slider, full screen.
-- Keyboard: ← → (or Page Up/Down) to turn, Home / End, F11 for full screen, Esc to go back.
-- Real cover thumbnails on the shelf, a "Continue reading" row, and search for big folders.
-- Remembers your page in every book, shows your progress on the shelf, and re-opens your last folder.
-- Controls fade away while you read; click the page counter to jump to a page.
-- Right-click a PDF → **Open with → Flipbook** works after installing.
-- Everything stays on your computer.
+## What it does
+
+- **Open a PDF** or **choose a folder**. Every PDF inside it, including sub-folders, becomes a book on a shelf.
+- Drag a PDF (or a folder) onto the window, or right-click a PDF → **Open with** → `flipbook.exe`.
+- Two-page spreads with a hard cover, page-turn animation, page slider, full screen.
+- Real cover thumbnails, a "Continue reading" row, reading progress on every book. Just start typing on the shelf to search.
+- Remembers your page in every book and re-opens your last folder.
+
+New in the Rust rewrite:
+
+- **Instant open, flat memory.** Pages are rasterised on background threads only around where you are reading, and released as you move on. A 2,000-page scan opens as fast as a pamphlet.
+- **Table of contents** from the PDF's outline, and **bookmarks** (`B`), in one side panel (`T`).
+- **Paper**: Day, Sepia or Night (`P`).
+- **Auto-turn** for hands-free reading: every 10, 20 or 40 seconds (`A`).
+- **One or two pages** (`D`); narrow windows switch to one page by themselves.
+- Covers are cached on disk, so the shelf is instant the second time.
+- Type a page number and press Enter to jump there.
+
+## Keys
+
+| Key | Does |
+| --- | --- |
+| `←` `→`, `Page Up` `Page Down`, `Space`, mouse wheel, click a side | Turn the page |
+| `Home` / `End` | First / last page |
+| digits, then `Enter` | Go to page |
+| `B` | Bookmark this page |
+| `T` | Contents and bookmarks |
+| `P` | Paper: Day → Sepia → Night |
+| `D` | One page / two pages |
+| `A` | Auto-turn: 10 s → 20 s → 40 s → off |
+| `F` or `F11` | Full screen |
+| `Esc` | Leave full screen, close the panel, back to the shelf |
 
 ## Get the .exe
 
-1. Push this repo to GitHub.
-2. Tag a release: `git tag v0.1.0 && git push --tags`
-3. GitHub Actions builds it and attaches `Flipbook-portable.exe` and the installer to the release.
+Tag a release and GitHub Actions builds it and attaches `Flipbook.exe`:
+
+```bash
+git tag v0.2.0 && git push --tags
+```
 
 You can also run the **Build Windows exe** workflow by hand from the Actions tab and download the artifact.
 
-Requires Windows 10/11 (WebView2 is already installed there).
-
 ## Build locally
 
-Install [Rust](https://rustup.rs), Node.js 22+, then:
+Install [Rust](https://rustup.rs) (on Windows, with the MSVC build tools), then:
 
 ```bash
-npm install
-npm run tauri -- icon app-icon.png   # generates src-tauri/icons
-npm run tauri -- dev                 # run
-npm run tauri -- build               # exe in src-tauri/target/release/
+cargo run --release
+```
+
+```bash
+cargo test
 ```
 
 ## How it is put together
 
 | Part | Job |
 | --- | --- |
-| `src-tauri/src/main.rs` | Rust: walks folders for PDFs, reads PDF bytes, handles "open with" |
-| `ui/index.html` | The shelf and the book |
-| `ui/vendor/` | pdf.js (Apache-2.0) renders pages, StPageFlip (MIT) turns them |
+| `src/main.rs` | The GPUI app: shelf, reader, page-turn animation, keys |
+| `src/pdf.rs` | Folder scan, page rasterising, covers, table of contents |
+| `src/store.rs` | Reading progress, bookmarks and settings (`%APPDATA%\Flipbook\state.json`) |
+
+PDFs are rendered by [hayro](https://github.com/LaurenzV/hayro), a pure-Rust rasteriser, so there is no PDFium DLL to ship. It does not open password-protected PDFs.
 
 MIT licensed.
