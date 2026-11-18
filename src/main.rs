@@ -1,13 +1,15 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod icons;
 mod pdf;
 mod store;
+mod update;
 
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, size, App, Application, Bounds, Context, Div,
+    div, img, linear_color_stop, svg, linear_gradient, prelude::*, px, rgb, size, App, Application, Bounds, Context, Div,
     ExternalPaths, FocusHandle, FontWeight, Hsla, KeyDownEvent, MouseButton, ObjectFit, PathPromptOptions, Pixels,
-    Point, RenderImage, Rgba, ScrollWheelEvent, SharedString, Stateful, Task, TitlebarOptions, Window,
+    Point, RenderImage, Rgba, ScrollWheelEvent, SharedString, Stateful, Svg, Task, TitlebarOptions, Window,
     WindowAppearance, WindowBounds, WindowOptions,
 };
 use hayro::hayro_syntax::Pdf;
@@ -15,10 +17,13 @@ use pdf::{Entry, TocItem};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use store::Store;
 
-const FLIP: f32 = 0.55; // seconds per page turn
+/// Page-turn styles, picked with S or the toolbar.
+const TURNS: [&str; 5] = ["Curl", "Fold", "Slide", "Fade", "None"];
+/// Seconds each style takes to turn a page.
+const TURN_SECS: [f32; 5] = [0.7, 0.55, 0.38, 0.32, 0.];
 const BAR: f32 = 52.0; // top bar height
 const FOOT: f32 = 60.0; // bottom bar height
 const SERIF: &str = "Georgia";
@@ -88,6 +93,9 @@ struct Flip {
     from: usize,
     to: usize,
     start: Instant,
+    /// Captured when the turn starts, so switching style mid-turn can't break it.
+    style: usize,
+    secs: f32,
 }
 
 struct Reader {
@@ -130,6 +138,11 @@ struct Flipbook {
     toast_task: Option<Task<()>>,
     /// Bumped on every open/close so a slow load can tell it has been superseded.
     token: usize,
+    /// A newer release on GitHub, until the user updates or says later.
+    release: Option<update::Release>,
+    updating: bool,
+    /// Installed copies update themselves; portable ones just open the release page.
+    installed: bool,
 }
 
 impl Flipbook {
@@ -146,7 +159,11 @@ impl Flipbook {
             toast: None,
             toast_task: None,
             token: 0,
+            release: None,
+            updating: false,
+            installed: update::installed(),
         };
+        this.check_for_update(cx);
         // startup: a PDF passed on the command line ("Open with"), and the last folder behind it
         if let Some(root) = this.store.root.clone() {
             this.scan(root, cx);
@@ -174,6 +191,59 @@ impl Flipbook {
             .ok();
         }));
         cx.notify();
+    }
+
+    // ---------- updates ----------
+
+    /// Ask GitHub whether there's a newer Flipbook. After a check that finds nothing, wait a day.
+    fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if self.store.no_update_check || now.saturating_sub(self.store.last_update_check) < 24 * 60 * 60 {
+            return;
+        }
+        let found = cx.background_executor().spawn(async { update::check() });
+        cx.spawn(async move |this, cx| {
+            let found = found.await;
+            this.update(cx, |this, cx| {
+                if found.is_none() {
+                    this.store.last_update_check = now;
+                    this.store.save();
+                }
+                this.release = found;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply_update(&mut self, cx: &mut Context<Self>) {
+        let Some(rel) = self.release.clone() else { return };
+        let Some((url, digest)) = rel.installer.filter(|_| self.installed) else {
+            return cx.open_url(&rel.page);
+        };
+        if self.updating {
+            return;
+        }
+        self.updating = true;
+        cx.notify();
+        let version = rel.version;
+        let job = cx.background_executor().spawn(async move {
+            update::download(&url, digest.as_deref(), &version).and_then(|installer| update::install(&installer))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            this.update(cx, |this, cx| match result {
+                // the installer waits for us to close, then reopens the new version
+                Ok(()) => cx.quit(),
+                Err(e) => {
+                    this.updating = false;
+                    this.say(e, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ---------- library ----------
@@ -356,7 +426,9 @@ impl Flipbook {
         if page == r.page {
             return;
         }
-        r.flip = animate.then(|| Flip { from: r.page, to: page, start: Instant::now() });
+        let style = (self.store.turn as usize).min(TURNS.len() - 1);
+        let secs = TURN_SECS[style];
+        r.flip = (animate && secs > 0.).then(|| Flip { from: r.page, to: page, start: Instant::now(), style, secs });
         r.page = page;
         let path = r.path.clone();
         self.store.book_mut(&path).page = page;
@@ -440,7 +512,14 @@ impl Flipbook {
     fn cycle_paper(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.store.paper = (self.store.paper + 1) % 3;
         self.store.save();
+        self.say(format!("Paper: {}", PAPERS[self.store.paper as usize]), cx);
         self.rerender(window, cx);
+    }
+
+    fn cycle_turn(&mut self, cx: &mut Context<Self>) {
+        self.store.turn = (self.store.turn + 1) % TURNS.len() as u8;
+        self.store.save();
+        self.say(format!("Page turn: {}", TURNS[self.store.turn as usize]), cx);
     }
 
     fn toggle_single(&mut self, cx: &mut Context<Self>) {
@@ -518,6 +597,7 @@ impl Flipbook {
             "d" => self.toggle_single(cx),
             "p" => self.cycle_paper(window, cx),
             "a" => self.cycle_auto(cx),
+            "s" => self.cycle_turn(cx),
             _ => {}
         }
     }
@@ -544,7 +624,7 @@ fn free(images: impl Iterator<Item = Arc<RenderImage>>, mut window: Option<&mut 
 
 // ---------- views ----------
 
-fn btn(id: &'static str, label: impl Into<SharedString>, th: &Theme) -> Stateful<Div> {
+fn btn_base(id: &'static str, th: &Theme) -> Stateful<Div> {
     let hover = th.line;
     div()
         .id(id)
@@ -557,9 +637,36 @@ fn btn(id: &'static str, label: impl Into<SharedString>, th: &Theme) -> Stateful
         .rounded_lg()
         .text_size(px(13.))
         .font_weight(FontWeight::SEMIBOLD)
+        .gap_2()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
-        .child(label.into())
+}
+
+fn icon(name: &str, color: impl Into<Hsla>) -> Svg {
+    svg().path(format!("icons/{name}.svg")).size(px(18.)).flex_none().text_color(color)
+}
+
+/// A square button showing one icon, with a tooltip naming what it does and its key.
+fn ibtn(id: &'static str, name: &str, tip: impl Into<SharedString>, color: impl Into<Hsla>, th: &Theme) -> Stateful<Div> {
+    let tip: SharedString = tip.into();
+    btn_base(id, th).min_w(px(34.)).px(px(8.)).child(icon(name, color)).tooltip(move |_, cx| cx.new(|_| Tip(tip.clone())).into())
+}
+
+struct Tip(SharedString);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().px_2().py_1().rounded_md().bg(rgb(0x2a241e)).text_color(rgb(0xf3eee5)).text_size(px(12.)).shadow_md().child(self.0.clone())
+    }
+}
+
+/// A vertical band of shadow, `a` dark at its left edge fading to `b` at its right.
+fn band(x: f32, w: f32, h: f32, a: f32, b: f32) -> Div {
+    div().absolute().top_0().left(px(x)).w(px(w.max(0.))).h(px(h)).bg(linear_gradient(
+        90.,
+        linear_color_stop(shade(a), 0.),
+        linear_color_stop(shade(b), 1.),
+    ))
 }
 
 impl Flipbook {
@@ -636,7 +743,7 @@ impl Flipbook {
         let where_ = match (&self.books, &self.store.root) {
             (Some(b), Some(root)) => format!("{} · {} {}", root.display(), b.len(), if b.len() == 1 { "book" } else { "books" }),
             _ if self.scanning => "Looking for PDFs…".into(),
-            _ => "Your PDFs as page-turning books. Nothing leaves this computer.".into(),
+            _ => "Your PDFs as page-turning books. They never leave this computer.".into(),
         };
         let mut id = 0;
         let mut next_id = || {
@@ -684,7 +791,8 @@ impl Flipbook {
                     .items_center()
                     .gap_2()
                     .text_color(th.mute)
-                    .child(div().font_family(SERIF).text_size(px(21.)).text_color(th.ink).child("Your shelf is empty"))
+                    .child(icon("two-pages", th.accent).size(px(44.)))
+                    .child(div().mt_2().font_family(SERIF).text_size(px(21.)).text_color(th.ink).child("Your shelf is empty"))
                     .child("Open a PDF, or choose a folder and every PDF inside it becomes a book.")
                     .child("You can also drop files onto this window."),
             )
@@ -709,7 +817,9 @@ impl Flipbook {
             .border_color(if self.query.is_empty() { th.line } else { th.accent })
             .bg(th.surface)
             .text_size(px(13.))
+            .gap_2()
             .overflow_hidden()
+            .child(icon("search", th.mute).size(px(16.)))
             .child(if self.query.is_empty() {
                 div().text_color(th.mute).child("Type to search")
             } else {
@@ -752,28 +862,86 @@ impl Flipbook {
                                 .gap_2()
                                 .when(self.books.as_ref().is_some_and(|b| b.len() > 6), |d| d.child(search))
                                 .child(
-                                    btn("pick-dir", "Choose folder", th)
+                                    btn_base("pick-dir", th)
+                                        .child(icon("folder", th.ink).size(px(16.)))
+                                        .child("Choose folder")
                                         .border_1()
                                         .border_color(th.line)
                                         .bg(th.surface)
                                         .on_click(cx.listener(|this, _, _, cx| this.pick(true, cx))),
                                 )
                                 .child(
-                                    btn("pick-file", "Open PDF", th)
+                                    btn_base("pick-file", th)
+                                        .child(icon("file-plus", th.on_accent).size(px(16.)))
+                                        .child("Open PDF")
                                         .bg(th.accent)
                                         .text_color(th.on_accent)
                                         .on_click(cx.listener(|this, _, _, cx| this.pick(false, cx))),
                                 )
                                 .child(
-                                    btn("theme", if self.dark(window) { "Light" } else { "Dark" }, th)
-                                        .text_color(th.mute)
-                                        .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
+                                    ibtn(
+                                        "theme",
+                                        if self.dark(window) { "sun" } else { "moon" },
+                                        if self.dark(window) { "Light theme" } else { "Dark theme" },
+                                        th.mute,
+                                        th,
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
                                 ),
                         ),
                 )
+                .children(self.release.as_ref().map(|rel| self.update_banner(rel, th, cx)))
                 .children(shelves)
                 .children(note),
         )
+    }
+
+    fn update_banner(&self, rel: &update::Release, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = rel.page.clone();
+        let self_update = self.installed && rel.installer.is_some();
+        let action = match (self_update, self.updating) {
+            (true, true) => "Updating…",
+            (true, false) => "Update now",
+            (false, _) => "Download",
+        };
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(th.accent)
+            .bg(th.surface)
+            .child(icon("download", th.accent).size(px(22.)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(200.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Flipbook {} is available", rel.version)))
+                    .child(div().text_size(px(12.)).text_color(th.mute).child(if self_update {
+                        format!("You have {}. Updating takes a few seconds and keeps your books and progress.", update::CURRENT)
+                    } else {
+                        format!("You have {}.", update::CURRENT)
+                    })),
+            )
+            .child(btn_base("whats-new", th).text_color(th.mute).child("What's new").on_click(move |_, _, cx| cx.open_url(&page)))
+            .when(!self.updating, |d| {
+                d.child(btn_base("later", th).text_color(th.mute).child("Later").on_click(cx.listener(|this, _, _, cx| {
+                    this.release = None;
+                    cx.notify();
+                })))
+            })
+            .child(
+                btn_base("update", th)
+                    .bg(th.accent)
+                    .text_color(th.on_accent)
+                    .when(self.updating, |b| b.opacity(0.7))
+                    .child(action)
+                    .on_click(cx.listener(|this, _, _, cx| this.apply_update(cx))),
+            )
     }
 
     /// One sheet of paper at `x`, `w` wide. Unrendered pages are blank paper.
@@ -793,52 +961,131 @@ impl Flipbook {
         )
     }
 
+    /// Part of a page: drawn as if it lay at `img_x`, but only `[clip_x, clip_x + clip_w]` shows.
+    /// This is how the curl reveals a page bit by bit without squashing it.
+    #[allow(clippy::too_many_arguments)]
+    fn clipped(&self, r: &Reader, page: Option<usize>, clip_x: f32, clip_w: f32, img_x: f32, w: f32, h: f32) -> Option<Div> {
+        if clip_w < 0.5 {
+            return None;
+        }
+        let sheet = self.sheet(r, page, img_x - clip_x, w, h, ObjectFit::Contain)?;
+        Some(div().absolute().top_0().left(px(clip_x)).w(px(clip_w)).h(px(h)).overflow_hidden().child(sheet))
+    }
+
+    /// The page or spread lying open at `page`, shifted right by `dx`.
+    fn spread(&self, r: &Reader, page: usize, dx: f32, w: f32, h: f32) -> Vec<Div> {
+        let (left, right, rx) = if r.two_up {
+            let s = spread_of(page);
+            (left_of(s), right_of(s, r.n), w)
+        } else {
+            (None, Some(page), 0.)
+        };
+        [self.sheet(r, left, dx, w, h, ObjectFit::Contain), self.sheet(r, right, dx + rx, w, h, ObjectFit::Contain)]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
     /// The book itself. `w` and `h` are the size of one page.
     fn book(&self, r: &Reader, w: f32, h: f32) -> Div {
-        let t = r.flip.as_ref().map(|f| (f, ease(f.start.elapsed().as_secs_f32() / FLIP)));
-        let book = div().relative().h(px(h)).w(px(if r.two_up { w * 2. } else { w }));
-        // the turning leaf is squashed toward the spine, and darkens as it stands up
-        let leaf = |page, x, lw: f32, dim: f32| {
-            self.sheet(r, page, x, lw, h, ObjectFit::Fill).map(|s| s.child(div().absolute().size_full().bg(shade(0.4 * dim))))
+        let full = if r.two_up { w * 2. } else { w };
+        let book = div().relative().h(px(h)).w(px(full));
+        let Some(f) = &r.flip else {
+            let s = spread_of(r.page);
+            return book
+                .children(self.spread(r, r.page, 0., w, h))
+                .when(r.two_up && left_of(s).is_some(), |b| b.child(band(w - 18., 18., h, 0., 0.16)))
+                .when(r.two_up && right_of(s, r.n).is_some(), |b| b.child(band(w, 18., h, 0.16, 0.)));
         };
-        match (r.two_up, t) {
-            (true, None) => {
-                let s = spread_of(r.page);
-                let gutter = |x: f32, a: f32, b: f32| {
-                    div().absolute().top_0().left(px(x)).w(px(18.)).h(px(h)).bg(linear_gradient(
-                        90.,
-                        linear_color_stop(shade(a), 0.),
-                        linear_color_stop(shade(b), 1.),
-                    ))
-                };
-                book.children(self.sheet(r, left_of(s), 0., w, h, ObjectFit::Contain))
-                    .children(self.sheet(r, right_of(s, r.n), w, w, h, ObjectFit::Contain))
-                    .when(left_of(s).is_some(), |b| b.child(gutter(w - 18., 0., 0.16)))
-                    .when(right_of(s, r.n).is_some(), |b| b.child(gutter(w, 0.16, 0.)))
+        let t = ease(f.start.elapsed().as_secs_f32() / f.secs);
+        match f.style {
+            1 => self.fold(book, r, f, t, w, h),
+            2 => {
+                // the whole spread slides away and the next slides in behind it
+                let gap = full + 40.;
+                let (a, b) = if f.to > f.from { (-gap * t, gap * (1. - t)) } else { (gap * t, -gap * (1. - t)) };
+                book.overflow_hidden().children(self.spread(r, f.from, a, w, h)).children(self.spread(r, f.to, b, w, h))
             }
-            (true, Some((f, t))) => {
-                let (a, b) = (spread_of(f.from), spread_of(f.to));
-                let forward = b > a;
-                let c = (std::f32::consts::PI * t).cos();
-                let lw = w * c.abs();
-                let (under_l, under_r) = if forward { (left_of(a), right_of(b, r.n)) } else { (left_of(b), right_of(a, r.n)) };
-                // first half: the departing page folds up; second half: the arriving page lays down opposite
-                let (page, on_right) = match (forward, c > 0.) {
-                    (true, true) => (right_of(a, r.n), true),
-                    (true, false) => (left_of(b), false),
-                    (false, true) => (left_of(a), false),
-                    (false, false) => (right_of(b, r.n), true),
-                };
-                book.children(self.sheet(r, under_l, 0., w, h, ObjectFit::Contain))
-                    .children(self.sheet(r, under_r, w, w, h, ObjectFit::Contain))
-                    .children(leaf(page, if on_right { w } else { w - lw }, lw, 1. - c.abs()))
-            }
-            (false, None) => book.children(self.sheet(r, Some(r.page), 0., w, h, ObjectFit::Contain)),
-            (false, Some((f, t))) => {
-                // single pages peel off to the left, or come back from it
-                let (under, top, lw) = if f.to > f.from { (f.to, f.from, w * (1. - t)) } else { (f.from, f.to, w * t) };
-                book.children(self.sheet(r, Some(under), 0., w, h, ObjectFit::Contain)).children(leaf(Some(top), 0., lw, 1. - lw / w))
-            }
+            3 => book
+                .children(self.spread(r, f.to, 0., w, h))
+                .child(div().absolute().size_full().opacity(1. - t).children(self.spread(r, f.from, 0., w, h))),
+            _ => self.curl(book, r, f, t, w, h),
+        }
+    }
+
+    /// The page folds over and its crease sweeps toward the spine, as if turned and pressed flat.
+    /// A backward turn is a forward turn played in reverse.
+    fn curl(&self, book: Div, r: &Reader, f: &Flip, t: f32, w: f32, h: f32) -> Div {
+        let (from, to, p) = if f.to > f.from { (f.from, f.to, t) } else { (f.to, f.from, 1. - t) };
+        let lift = (std::f32::consts::PI * p).sin(); // how far the page stands off the paper
+        if r.two_up {
+            let (a, b) = (spread_of(from), spread_of(to));
+            let x = 2. * w - w * p; // the crease: outer edge -> spine
+            let back = 2. * x - 2. * w; // left edge of the turned-over part
+            let bent = (x - back).min(50.);
+            book.children(self.sheet(r, left_of(a), 0., w, h, ObjectFit::Contain))
+                .children(self.sheet(r, right_of(b, r.n), w, w, h, ObjectFit::Contain))
+                // what is left of the page still lying flat
+                .children(self.clipped(r, right_of(a, r.n), w, back - w, w, w, h))
+                // shadow the lifted page casts on the page it uncovers
+                .child(band(x, (2. * w - x).min(70.), h, 0.38 * lift, 0.))
+                // shadow under the turned page's outer edge
+                .child(band((back - 24.).max(0.), 24., h, 0., 0.3 * lift))
+                // the back of the turning page, already showing what will be the left page
+                .children(self.clipped(r, left_of(b), back, x - back, back, w, h))
+                // darker toward the crease, where the paper bends away from the light
+                .child(band(x - bent, bent, h, 0., 0.25 * lift))
+        } else {
+            let x = w * (1. - p); // the crease: right edge -> left edge
+            let back = 2. * x - w;
+            let bent = (x - back).min(50.);
+            // past halfway the turned page leaves the book to the left; clip it there
+            book.overflow_hidden()
+                .children(self.sheet(r, Some(to), 0., w, h, ObjectFit::Contain))
+                .children(self.clipped(r, Some(from), 0., back, 0., w, h))
+                .child(band(x, (w - x).min(70.), h, 0.38 * lift, 0.))
+                // the back of a single page is blank paper (usize::MAX is never a rendered page)
+                .children(self.clipped(r, Some(usize::MAX), back, x - back, back, w, h).map(|d| {
+                    d.child(band(0., x - back, h, 0.05, 0.05)).child(band(x - back - bent, bent, h, 0., 0.25 * lift))
+                }))
+        }
+    }
+
+    /// The turning leaf narrows toward the spine as it stands up, then lays down on the other side.
+    fn fold(&self, book: Div, r: &Reader, f: &Flip, t: f32, w: f32, h: f32) -> Div {
+        // the spine side of a standing leaf is in shadow
+        let leaf = |page, x: f32, lw: f32, dim: f32, spine_left: bool| {
+            self.sheet(r, page, x, lw, h, ObjectFit::Fill).map(|s| {
+                let (a, b) = if spine_left { (0.5 * dim, 0.12 * dim) } else { (0.12 * dim, 0.5 * dim) };
+                s.child(band(0., lw, h, a, b))
+            })
+        };
+        if r.two_up {
+            let (a, b) = (spread_of(f.from), spread_of(f.to));
+            let forward = b > a;
+            let c = (std::f32::consts::PI * t).cos();
+            let lw = w * c.abs();
+            let dim = 1. - c.abs();
+            let (under_l, under_r) = if forward { (left_of(a), right_of(b, r.n)) } else { (left_of(b), right_of(a, r.n)) };
+            // first half: the departing page folds up; second half: the arriving page lays down opposite
+            let (page, on_right) = match (forward, c > 0.) {
+                (true, true) => (right_of(a, r.n), true),
+                (true, false) => (left_of(b), false),
+                (false, true) => (left_of(a), false),
+                (false, false) => (right_of(b, r.n), true),
+            };
+            let shadow = (w - lw).min(60.);
+            book.children(self.sheet(r, under_l, 0., w, h, ObjectFit::Contain))
+                .children(self.sheet(r, under_r, w, w, h, ObjectFit::Contain))
+                .child(if on_right { band(w + lw, shadow, h, 0.3 * dim, 0.) } else { band(w - lw - shadow, shadow, h, 0., 0.3 * dim) })
+                .children(leaf(page, if on_right { w } else { w - lw }, lw, dim, on_right))
+        } else {
+            // single pages fold away to the left, or come back from it
+            let (under, top, lw) = if f.to > f.from { (f.to, f.from, w * (1. - t)) } else { (f.from, f.to, w * t) };
+            let dim = 1. - lw / w;
+            book.children(self.sheet(r, Some(under), 0., w, h, ObjectFit::Contain))
+                .child(band(lw, (w - lw).min(60.), h, 0.3 * dim, 0.))
+                .children(leaf(Some(top), 0., lw, dim, true))
         }
     }
 
@@ -905,7 +1152,7 @@ impl Flipbook {
                 r.page = first_of(spread_of(r.page));
             }
         }
-        if r.flip.as_ref().is_some_and(|f| f.start.elapsed().as_secs_f32() >= FLIP) {
+        if r.flip.as_ref().is_some_and(|f| f.start.elapsed().as_secs_f32() >= f.secs) {
             r.flip = None;
         }
         if r.flip.is_some() {
@@ -947,7 +1194,10 @@ impl Flipbook {
             let f = ((f32::from(at.x) - track_x) / track).clamp(0., 1.);
             this.goto((f * (n - 1) as f32).round() as usize, false, cx);
         };
-        let nav = |id, label: &'static str, off: bool| btn(id, label, th).w(px(36.)).px_0().text_size(px(20.)).when(off, |b| b.opacity(0.3));
+        let nav = |id, name: &str, tip: &'static str, off: bool| ibtn(id, name, tip, th.ink, th).when(off, |b| b.opacity(0.3));
+        let turn = (self.store.turn as usize).min(TURNS.len() - 1);
+        let full = window.is_fullscreen();
+        let on = |yes: bool| if yes { th.accent } else { th.mute };
 
         let bar = div()
             .h(px(BAR))
@@ -957,19 +1207,26 @@ impl Flipbook {
             .items_center()
             .gap_1()
             .text_color(th.mute)
-            .child(btn("back", "← Library", th).on_click(cx.listener(|this, _, window, cx| this.close(Some(window), cx))))
-            .child(btn("contents", "Contents", th).on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))))
+            .child(ibtn("back", "arrow-left", "Back to the shelf (Esc)", th.mute, th).on_click(cx.listener(|this, _, window, cx| this.close(Some(window), cx))))
+            .child(ibtn("contents", "list", "Contents and bookmarks (T)", on(r.panel), th).on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))))
             .child(div().flex_1().min_w_0().truncate().text_center().font_family(SERIF).text_size(px(16.)).text_color(th.ink).child(r.title.clone()))
-            .child(btn("mark", if marked { "Bookmarked" } else { "Bookmark" }, th).when(marked, |b| b.text_color(th.accent)).on_click(cx.listener(|this, _, _, cx| this.toggle_bookmark(cx))))
-            .child(btn("paper", PAPERS[paper.min(2) as usize], th).on_click(cx.listener(|this, _, window, cx| this.cycle_paper(window, cx))))
-            .child(btn("pages", if single { "1 page" } else { "2 pages" }, th).on_click(cx.listener(|this, _, _, cx| this.toggle_single(cx))))
             .child(
-                btn("auto", if r.auto_secs > 0 { format!("Auto {}s", r.auto_secs) } else { "Auto".into() }, th)
-                    .when(r.auto_secs > 0, |b| b.text_color(th.accent))
+                ibtn("mark", if marked { "bookmark-fill" } else { "bookmark" }, if marked { "Remove bookmark (B)" } else { "Bookmark this page (B)" }, on(marked), th)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_bookmark(cx))),
+            )
+            .child(ibtn("turn", "page-turn", format!("Page turn: {} (S)", TURNS[turn]), th.mute, th).on_click(cx.listener(|this, _, _, cx| this.cycle_turn(cx))))
+            .child(ibtn("paper", "paper", format!("Paper: {} (P)", PAPERS[paper.min(2) as usize]), th.mute, th).on_click(cx.listener(|this, _, window, cx| this.cycle_paper(window, cx))))
+            .child(
+                ibtn("pages", if single { "one-page" } else { "two-pages" }, if single { "One page (D)" } else { "Two pages (D)" }, th.mute, th)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_single(cx))),
+            )
+            .child(
+                ibtn("auto", "timer", if r.auto_secs > 0 { format!("Auto-turn every {} seconds (A)", r.auto_secs) } else { "Auto-turn (A)".into() }, on(r.auto_secs > 0), th)
+                    .when(r.auto_secs > 0, |b| b.child(div().text_size(px(12.)).text_color(th.accent).child(format!("{}s", r.auto_secs))))
                     .on_click(cx.listener(|this, _, _, cx| this.cycle_auto(cx))),
             )
-            .child(btn("theme", if dark { "Light" } else { "Dark" }, th).on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))))
-            .child(btn("full", "Full screen", th).on_click(cx.listener(|_, _, window, _| window.toggle_fullscreen())));
+            .child(ibtn("theme", if dark { "sun" } else { "moon" }, if dark { "Light theme" } else { "Dark theme" }, th.mute, th).on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))))
+            .child(ibtn("full", if full { "minimize" } else { "maximize" }, if full { "Leave full screen (F)" } else { "Full screen (F)" }, th.mute, th).on_click(cx.listener(|_, _, window, _| window.toggle_fullscreen())));
 
         let stage = div()
             .id("stage")
@@ -1001,7 +1258,7 @@ impl Flipbook {
             .items_center()
             .justify_center()
             .gap(px(10.))
-            .child(nav("prev", "‹", r.page == 0).on_click(cx.listener(|this, _, _, cx| this.step(-1, cx))))
+            .child(nav("prev", "chevron-left", "Previous page (←)", r.page == 0).on_click(cx.listener(|this, _, _, cx| this.step(-1, cx))))
             .child(
                 div()
                     .id("seek")
@@ -1021,7 +1278,7 @@ impl Flipbook {
                     .child(div().absolute().top(px(5.)).left(px(track * frac - 7.)).size(px(14.)).rounded_full().bg(th.accent).border_2().border_color(th.surface)),
             )
             .child(div().flex_none().w(px(110.)).text_center().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(count))
-            .child(nav("next", "›", last + 1 >= r.n).on_click(cx.listener(|this, _, _, cx| this.step(1, cx))));
+            .child(nav("next", "chevron-right", "Next page (→)", last + 1 >= r.n).on_click(cx.listener(|this, _, _, cx| this.step(1, cx))));
 
         div()
             .size_full()
@@ -1069,7 +1326,7 @@ impl Render for Flipbook {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(icons::Icons).run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         cx.open_window(
             WindowOptions {
