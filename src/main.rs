@@ -4,6 +4,7 @@
 mod icons;
 mod pdf;
 mod store;
+mod update;
 
 use gpui::{
     div, img, linear_color_stop, svg, linear_gradient, prelude::*, px, rgb, size, App, Application, Bounds, Context, Div,
@@ -16,7 +17,7 @@ use pdf::{Entry, TocItem};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use store::Store;
 
 /// Page-turn styles, picked with S or the toolbar.
@@ -137,6 +138,11 @@ struct Flipbook {
     toast_task: Option<Task<()>>,
     /// Bumped on every open/close so a slow load can tell it has been superseded.
     token: usize,
+    /// A newer release on GitHub, until the user updates or says later.
+    release: Option<update::Release>,
+    updating: bool,
+    /// Installed copies update themselves; portable ones just open the release page.
+    installed: bool,
 }
 
 impl Flipbook {
@@ -153,7 +159,11 @@ impl Flipbook {
             toast: None,
             toast_task: None,
             token: 0,
+            release: None,
+            updating: false,
+            installed: update::installed(),
         };
+        this.check_for_update(cx);
         // startup: a PDF passed on the command line ("Open with"), and the last folder behind it
         if let Some(root) = this.store.root.clone() {
             this.scan(root, cx);
@@ -181,6 +191,59 @@ impl Flipbook {
             .ok();
         }));
         cx.notify();
+    }
+
+    // ---------- updates ----------
+
+    /// Ask GitHub whether there's a newer Flipbook. After a check that finds nothing, wait a day.
+    fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if self.store.no_update_check || now.saturating_sub(self.store.last_update_check) < 24 * 60 * 60 {
+            return;
+        }
+        let found = cx.background_executor().spawn(async { update::check() });
+        cx.spawn(async move |this, cx| {
+            let found = found.await;
+            this.update(cx, |this, cx| {
+                if found.is_none() {
+                    this.store.last_update_check = now;
+                    this.store.save();
+                }
+                this.release = found;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply_update(&mut self, cx: &mut Context<Self>) {
+        let Some(rel) = self.release.clone() else { return };
+        let Some((url, digest)) = rel.installer.filter(|_| self.installed) else {
+            return cx.open_url(&rel.page);
+        };
+        if self.updating {
+            return;
+        }
+        self.updating = true;
+        cx.notify();
+        let version = rel.version;
+        let job = cx.background_executor().spawn(async move {
+            update::download(&url, digest.as_deref(), &version).and_then(|installer| update::install(&installer))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            this.update(cx, |this, cx| match result {
+                // the installer waits for us to close, then reopens the new version
+                Ok(()) => cx.quit(),
+                Err(e) => {
+                    this.updating = false;
+                    this.say(e, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ---------- library ----------
@@ -680,7 +743,7 @@ impl Flipbook {
         let where_ = match (&self.books, &self.store.root) {
             (Some(b), Some(root)) => format!("{} · {} {}", root.display(), b.len(), if b.len() == 1 { "book" } else { "books" }),
             _ if self.scanning => "Looking for PDFs…".into(),
-            _ => "Your PDFs as page-turning books. Nothing leaves this computer.".into(),
+            _ => "Your PDFs as page-turning books. They never leave this computer.".into(),
         };
         let mut id = 0;
         let mut next_id = || {
@@ -827,9 +890,58 @@ impl Flipbook {
                                 ),
                         ),
                 )
+                .children(self.release.as_ref().map(|rel| self.update_banner(rel, th, cx)))
                 .children(shelves)
                 .children(note),
         )
+    }
+
+    fn update_banner(&self, rel: &update::Release, th: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = rel.page.clone();
+        let self_update = self.installed && rel.installer.is_some();
+        let action = match (self_update, self.updating) {
+            (true, true) => "Updating…",
+            (true, false) => "Update now",
+            (false, _) => "Download",
+        };
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(th.accent)
+            .bg(th.surface)
+            .child(icon("download", th.accent).size(px(22.)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(200.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Flipbook {} is available", rel.version)))
+                    .child(div().text_size(px(12.)).text_color(th.mute).child(if self_update {
+                        format!("You have {}. Updating takes a few seconds and keeps your books and progress.", update::CURRENT)
+                    } else {
+                        format!("You have {}.", update::CURRENT)
+                    })),
+            )
+            .child(btn_base("whats-new", th).text_color(th.mute).child("What's new").on_click(move |_, _, cx| cx.open_url(&page)))
+            .when(!self.updating, |d| {
+                d.child(btn_base("later", th).text_color(th.mute).child("Later").on_click(cx.listener(|this, _, _, cx| {
+                    this.release = None;
+                    cx.notify();
+                })))
+            })
+            .child(
+                btn_base("update", th)
+                    .bg(th.accent)
+                    .text_color(th.on_accent)
+                    .when(self.updating, |b| b.opacity(0.7))
+                    .child(action)
+                    .on_click(cx.listener(|this, _, _, cx| this.apply_update(cx))),
+            )
     }
 
     /// One sheet of paper at `x`, `w` wide. Unrendered pages are blank paper.

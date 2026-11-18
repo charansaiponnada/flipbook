@@ -33,6 +33,10 @@ pub struct Store {
     pub single: bool,
     /// Page-turn style, an index into TURNS in main.rs. 0 = curl.
     pub turn: u8,
+    /// When an update check last found nothing (seconds since 1970).
+    pub last_update_check: u64,
+    /// Set to true in state.json to never contact GitHub.
+    pub no_update_check: bool,
     /// Newest first.
     pub recent: Vec<PathBuf>,
     pub books: HashMap<String, Book>,

@@ -1,6 +1,6 @@
 # 📖 Flipbook
 
-Open any PDF as a real page-turning book. A native app written entirely in **Rust** with [**GPUI**](https://www.gpui.rs), the GPU-accelerated UI framework behind the Zed editor. No webview, no JavaScript, no upload: one `.exe`, and everything stays on your computer.
+Open any PDF as a real page-turning book. A native app written entirely in **Rust** with [**GPUI**](https://www.gpui.rs), the GPU-accelerated UI framework behind the Zed editor. No webview, no JavaScript, no upload: one `.exe`, and your PDFs never leave your computer.
 
 ## What it does
 
@@ -48,12 +48,18 @@ Download **`Flipbook-setup.exe`** from the [latest release](https://github.com/c
 
 Prefer no installer? `Flipbook-portable.exe` is the same app as a single file.
 
+### Updates
+
+When a new version is out, the shelf shows a banner. In an installed copy, **Update now** downloads the new installer, checks it against the SHA-256 GitHub publishes for it, installs it and reopens Flipbook; your books, progress and bookmarks stay. A portable copy opens the release page instead.
+
+To find out, Flipbook sends one anonymous request to the GitHub API when it starts, at most once a day when nothing is new. It sends nothing about you or your books. To turn it off, set `"no_update_check": true` in `%APPDATA%\Flipbook\state.json`.
+
 Windows may show a SmartScreen warning the first time, because the exe isn't code-signed: click **More info → Run anyway**.
 
 To publish a release, bump `version` in `Cargo.toml`, then tag it; GitHub Actions builds both files and attaches them:
 
 ```bash
-git tag v0.3.0 && git push --tags
+git tag v0.4.0 && git push --tags
 ```
 
 ## Build locally
@@ -71,10 +77,10 @@ cargo test
 To build the installer too, install [NSIS](https://nsis.sourceforge.io), then:
 
 ```bash
-makensis -DVERSION=0.3.0 assets/windows/installer.nsi
+makensis -DVERSION=0.4.0 assets/windows/installer.nsi
 ```
 
-It is written to `target/release/Flipbook-0.3.0-setup.exe`.
+It is written to `target/release/Flipbook-0.4.0-setup.exe`.
 
 ## How it is put together
 
@@ -82,6 +88,7 @@ It is written to `target/release/Flipbook-0.3.0-setup.exe`.
 | --- | --- |
 | `src/main.rs` | The GPUI app: shelf, reader, page-turn styles, keys |
 | `src/icons.rs` | The toolbar icons, drawn as SVG and served to GPUI |
+| `src/update.rs` | Checks GitHub for a newer release, downloads and verifies the installer |
 | `src/pdf.rs` | Folder scan, page rasterising, covers, table of contents |
 | `src/store.rs` | Reading progress, bookmarks and settings (`%APPDATA%\Flipbook\state.json`) |
 | `build.rs` | Embeds the icon and version info in the exe |

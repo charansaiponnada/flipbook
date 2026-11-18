@@ -2,11 +2,13 @@
 ;   cargo build --release
 ;   makensis /DVERSION=0.3.0 assets\windows\installer.nsi
 ; Installs for the current user only: no admin prompt, nothing written outside the user's profile.
+; The app updates itself by running this silently with /S /UPDATE: wait for it to close, install, reopen it.
 
 Unicode true
 ManifestDPIAware true
 !include MUI2.nsh
 !include FileFunc.nsh
+!include LogicLib.nsh
 
 !ifndef VERSION
   !define VERSION 0.0.0
@@ -54,8 +56,28 @@ VIAddVersionKey "LegalCopyright" "MIT licensed"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
+Var update
+
+Function .onInit
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${IfNot} ${Errors}
+    StrCpy $update 1
+  ${EndIf}
+FunctionEnd
+
+Function .onInstSuccess
+  ${If} $update == 1
+    Exec '"$INSTDIR\${EXE}"'
+  ${EndIf}
+FunctionEnd
+
 Section "${APP}" SecApp
   SectionIn RO
+  ${If} $update == 1
+    Sleep 2500 ; let the old Flipbook finish closing so its exe can be replaced
+  ${EndIf}
   SetOutPath "$INSTDIR"
   File "${ROOT}\target\release\${EXE}"
   File "${ROOT}\LICENSE"

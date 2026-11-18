@@ -24,6 +24,7 @@ const ICONS: &[(&str, &str)] = &[
     ("chevron-right", r#"<path d="M9 18l6-6-6-6"/>"#),
     ("folder", r#"<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#),
     ("file-plus", r#"<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 12v6M9 15h6"/>"#),
+    ("download", r#"<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>"#),
     ("search", r#"<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>"#),
 ];
 
