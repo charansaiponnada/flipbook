@@ -5,7 +5,7 @@ Open any PDF as a real page-turning book. A native app written entirely in **Rus
 ## What it does
 
 - **Open a PDF** or **choose a folder**. Every PDF inside it, including sub-folders, becomes a book on a shelf.
-- Drag a PDF (or a folder) onto the window, or right-click a PDF → **Open with** → `flipbook.exe`.
+- Drag a PDF (or a folder) onto the window, or right-click a PDF → **Open with** → **Flipbook**.
 - Two-page spreads with a hard cover, page-turn animation, page slider, full screen.
 - Real cover thumbnails, a "Continue reading" row, reading progress on every book. Just start typing on the shelf to search.
 - Remembers your page in every book and re-opens your last folder.
@@ -35,15 +35,24 @@ New in the Rust rewrite:
 | `F` or `F11` | Full screen |
 | `Esc` | Leave full screen, close the panel, back to the shelf |
 
-## Get the .exe
+## Install
 
-Tag a release and GitHub Actions builds it and attaches `Flipbook.exe`:
+Download **`Flipbook-setup.exe`** from the [latest release](https://github.com/charansaiponnada/flipbook/releases/latest) and run it.
+
+- Installs just for you: no administrator prompt.
+- Adds Flipbook to the Start menu (and, if you tick it, the desktop).
+- Adds Flipbook to **Open with** for PDFs, without taking over your default PDF app.
+- Uninstall from **Settings → Apps**. Your reading progress and bookmarks are kept.
+
+Prefer no installer? `Flipbook-portable.exe` is the same app as a single file.
+
+Windows may show a SmartScreen warning the first time, because the exe isn't code-signed: click **More info → Run anyway**.
+
+To publish a release, bump `version` in `Cargo.toml`, then tag it; GitHub Actions builds both files and attaches them:
 
 ```bash
-git tag v0.2.0 && git push --tags
+git tag v0.3.0 && git push --tags
 ```
-
-You can also run the **Build Windows exe** workflow by hand from the Actions tab and download the artifact.
 
 ## Build locally
 
@@ -57,6 +66,14 @@ cargo run --release
 cargo test
 ```
 
+To build the installer too, install [NSIS](https://nsis.sourceforge.io), then:
+
+```bash
+makensis -DVERSION=0.3.0 assets/windows/installer.nsi
+```
+
+It is written to `target/release/Flipbook-0.3.0-setup.exe`.
+
 ## How it is put together
 
 | Part | Job |
@@ -64,6 +81,8 @@ cargo test
 | `src/main.rs` | The GPUI app: shelf, reader, page-turn animation, keys |
 | `src/pdf.rs` | Folder scan, page rasterising, covers, table of contents |
 | `src/store.rs` | Reading progress, bookmarks and settings (`%APPDATA%\Flipbook\state.json`) |
+| `build.rs` | Embeds the icon and version info in the exe |
+| `assets/windows/` | Icon, its generator (`icon.py`), and the NSIS installer script |
 
 PDFs are rendered by [hayro](https://github.com/LaurenzV/hayro), a pure-Rust rasteriser, so there is no PDFium DLL to ship. It does not open password-protected PDFs.
 
