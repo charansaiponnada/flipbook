@@ -6,7 +6,8 @@ Open any PDF as a real page-turning book. A native app written entirely in **Rus
 
 - **Open a PDF** or **choose a folder**. Every PDF inside it, including sub-folders, becomes a book on a shelf.
 - Drag a PDF (or a folder) onto the window, or right-click a PDF → **Open with** → **Flipbook**.
-- Two-page spreads with a hard cover, page-turn animation, page slider, full screen.
+- Two-page spreads with a hard cover, page slider, full screen.
+- **Five page-turn styles** (`S` or the toolbar): **Curl**, where the page folds over and its crease sweeps across with real shadows; **Fold**, where the page stands up at the spine and lays down on the other side; **Slide**; **Fade**; or **None** for instant turns.
 - Real cover thumbnails, a "Continue reading" row, reading progress on every book. Just start typing on the shelf to search.
 - Remembers your page in every book and re-opens your last folder.
 
@@ -32,6 +33,7 @@ New in the Rust rewrite:
 | `P` | Paper: Day → Sepia → Night |
 | `D` | One page / two pages |
 | `A` | Auto-turn: 10 s → 20 s → 40 s → off |
+| `S` | Page turn: Curl → Fold → Slide → Fade → None |
 | `F` or `F11` | Full screen |
 | `Esc` | Leave full screen, close the panel, back to the shelf |
 
@@ -78,7 +80,8 @@ It is written to `target/release/Flipbook-0.3.0-setup.exe`.
 
 | Part | Job |
 | --- | --- |
-| `src/main.rs` | The GPUI app: shelf, reader, page-turn animation, keys |
+| `src/main.rs` | The GPUI app: shelf, reader, page-turn styles, keys |
+| `src/icons.rs` | The toolbar icons, drawn as SVG and served to GPUI |
 | `src/pdf.rs` | Folder scan, page rasterising, covers, table of contents |
 | `src/store.rs` | Reading progress, bookmarks and settings (`%APPDATA%\Flipbook\state.json`) |
 | `build.rs` | Embeds the icon and version info in the exe |
